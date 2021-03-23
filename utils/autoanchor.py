@@ -5,17 +5,18 @@ import torch
 import yaml
 from scipy.cluster.vq import kmeans
 from tqdm import tqdm
+import pdb
 
 from utils.general import colorstr
 
 
 def check_anchor_order(m):
     # Check anchor order against stride order for YOLOv5 Detect() module m, and correct if necessary
-    a = m.anchor_grid.prod(-1).view(-1)  # anchor area
-    da = a[-1] - a[0]  # delta a
-    ds = m.stride[-1] - m.stride[0]  # delta s
-    if da.sign() != ds.sign():  # same order
-        print('Reversing anchor order')
+    a = m.anchor_grid.prod(-1).view(-1)  # anchor area  / prod(index): 해당차원 없앰 / shape: (9) 즉 anchor box의 면적 픿셀 수 (10x13, 16x630 ..., 373x326)
+    da = a[-1] - a[0]  # delta a  / 121598 - 130 = 121468
+    ds = m.stride[-1] - m.stride[0]  # delta s / 32 - 8 = 24
+    if da.sign() != ds.sign():  # same order   / sign: 음수 -> -1, 양수 -> 1, 0 -> 0
+        print('Reversing anchor order')  # anchor box가 반대로 적혀있으면 뒤집음
         m.anchors[:] = m.anchors.flip(0)
         m.anchor_grid[:] = m.anchor_grid.flip(0)
 

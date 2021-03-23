@@ -8,12 +8,14 @@ from utils.torch_utils import is_parallel
 
 
 def smooth_BCE(eps=0.1):  # https://github.com/ultralytics/yolov3/issues/238#issuecomment-598028441
-    # return positive, negative label smoothing BCE targets
+    # return positive, negative label smoothing BCE target
+    # encoding된 hard한 정답은 모델에 overfitting을 가져올 수 있기 때문에 label에 대한 확신을 조금 낮추는 일종의 regularization
     return 1.0 - 0.5 * eps, 0.5 * eps
 
 
 class BCEBlurWithLogitsLoss(nn.Module):
     # BCEwithLogitLoss() with reduced missing label effects.
+    # 정답이 아닌데(true=0) 예측을 높게(pred~1) 한곳에 패널티
     def __init__(self, alpha=0.05):
         super(BCEBlurWithLogitsLoss, self).__init__()
         self.loss_fcn = nn.BCEWithLogitsLoss(reduction='none')  # must be nn.BCEWithLogitsLoss()
@@ -24,7 +26,7 @@ class BCEBlurWithLogitsLoss(nn.Module):
         pred = torch.sigmoid(pred)  # prob from logits
         dx = pred - true  # reduce only missing label effects
         # dx = (pred - true).abs()  # reduce missing label and false label effects
-        alpha_factor = 1 - torch.exp((dx - 1) / (self.alpha + 1e-4))
+        alpha_factor = 1 - torch.exp((dx - 1) / (self.alpha + 1e-4))  # dx가 나올수 있는 범위: -1~1 / 1에 가까울수록 alpha 상승
         loss *= alpha_factor
         return loss.mean()
 
@@ -40,16 +42,16 @@ class FocalLoss(nn.Module):
         self.loss_fcn.reduction = 'none'  # required to apply FL to each element
 
     def forward(self, pred, true):
-        loss = self.loss_fcn(pred, true)
+        loss = self.loss_fcn(pred, true)  # sigmoid + binary cross entropy -> log(pt)
         # p_t = torch.exp(-loss)
         # loss *= self.alpha * (1.000001 - p_t) ** self.gamma  # non-zero power for gradient stability
 
         # TF implementation https://github.com/tensorflow/addons/blob/v0.7.1/tensorflow_addons/losses/focal_loss.py
         pred_prob = torch.sigmoid(pred)  # prob from logits
-        p_t = true * pred_prob + (1 - true) * (1 - pred_prob)
-        alpha_factor = true * self.alpha + (1 - true) * (1 - self.alpha)
+        p_t = true * pred_prob + (1 - true) * (1 - pred_prob)  # true=pred_prob, false=1-pred_prob  / p_t가 높을수록 좋음(0~1)
+        alpha_factor = true * self.alpha + (1 - true) * (1 - self.alpha)  # true=0.25, false=0.75
         modulating_factor = (1.0 - p_t) ** self.gamma
-        loss *= alpha_factor * modulating_factor
+        loss *= alpha_factor * modulating_factor  # alpha * (1.0 - p_t) ** self.gamma * loss(bce logitsloss를 써서 -가 붙어있음)
 
         if self.reduction == 'mean':
             return loss.mean()
@@ -74,7 +76,7 @@ class QFocalLoss(nn.Module):
 
         pred_prob = torch.sigmoid(pred)  # prob from logits
         alpha_factor = true * self.alpha + (1 - true) * (1 - self.alpha)
-        modulating_factor = torch.abs(true - pred_prob) ** self.gamma
+        modulating_factor = torch.abs(true - pred_prob) ** self.gamma  # l1 loss / 둘다 크던가 둘다 작을때 loss는 줄어듬
         loss *= alpha_factor * modulating_factor
 
         if self.reduction == 'mean':
@@ -93,16 +95,17 @@ class ComputeLoss:
         h = model.hyp  # hyperparameters
 
         # Define criteria
-        BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
-        BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']], device=device))
+        BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))  # class loss
+        BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']], device=device))  # object loss
 
         # Class label smoothing https://arxiv.org/pdf/1902.04103.pdf eqn 3
-        self.cp, self.cn = smooth_BCE(eps=0.0)
+        # Bag of freebies : inference 중에 추가적인 computational cost없이 성능을 향상시킬 수 있는 기법
+        self.cp, self.cn = smooth_BCE(eps=0.0)  # positive, negative
 
         # Focal loss
         g = h['fl_gamma']  # focal loss gamma
         if g > 0:
-            BCEcls, BCEobj = FocalLoss(BCEcls, g), FocalLoss(BCEobj, g)
+            BCEcls, BCEobj = FocalLoss(BCEcls, g), FocalLoss(BCEobj, g)  # class, object loss 둘다 Focalloss로 BCE를 들고 감
 
         det = model.module.model[-1] if is_parallel(model) else model.model[-1]  # Detect() module
         self.balance = {3: [4.0, 1.0, 0.4]}.get(det.nl, [4.0, 1.0, 0.25, 0.06, .02])  # P3-P7

@@ -28,13 +28,13 @@ class Detect(nn.Module):
         super(Detect, self).__init__()
         self.nc = nc  # number of classes
         self.no = nc + 5  # number of outputs per anchor
-        self.nl = len(anchors)  # number of detection layers
-        self.na = len(anchors[0]) // 2  # number of anchors
-        self.grid = [torch.zeros(1)] * self.nl  # init grid
-        a = torch.tensor(anchors).float().view(self.nl, -1, 2)
-        self.register_buffer('anchors', a)  # shape(nl,na,2)
-        self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
-        self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv
+        self.nl = len(anchors)  # number of detection layers  3
+        self.na = len(anchors[0]) // 2  # number of anchors  3
+        self.grid = [torch.zeros(1)] * self.nl  # init grid tensor (0), (0), (0)
+        a = torch.tensor(anchors).float().view(self.nl, -1, 2)  # tensor(3, 3, 2)
+        self.register_buffer('anchors', a)  # shape(nl,na,2)  / 모델의 파라미터로 등록하지 않지 않음
+        self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # (3, 1, 3, 1, 1, 2) / clone=copy
+        self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # 세개의 output feature_map
 
     def forward(self, x):
         # x = x.copy()  # for profiling
@@ -49,6 +49,7 @@ class Detect(nn.Module):
                 if self.grid[i].shape[2:4] != x[i].shape[2:4]:
                     self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
 
+                #나중에 확인할것
                 y = x[i].sigmoid()
                 y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i]) * self.stride[i]  # xy
                 y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
@@ -56,10 +57,10 @@ class Detect(nn.Module):
 
         return x if self.training else (torch.cat(z, 1), x)
 
-    @staticmethod  # 정적 메서드 (인스턴스없이 바로 접근가능한 함수 ex) Detect._make_grid())
+    @staticmethod  # 정적 메서드 (인스턴스없이 바로 접근가능한 함수, self 쓰지않음)
     def _make_grid(nx=20, ny=20):
         yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
-        return torch.stack((xv, yv), 2).view((1, 1, ny, nx, 2)).float()
+        return torch.stack((xv, yv), 2).view((1, 1, ny, nx, 2)).float()  # if 20x20 : (1, 1, 20, 20, 2)
 
 
 class Model(nn.Module):
@@ -85,15 +86,16 @@ class Model(nn.Module):
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
-        pdb.set_trace()
+
         # Build strides, anchors
         m = self.model[-1]  # Detect()
         if isinstance(m, Detect):
+
             s = 256  # 2x min stride
-            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
-            m.anchors /= m.stride.view(-1, 1, 1)
+            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward / 8, 16, 32
+            m.anchors /= m.stride.view(-1, 1, 1)  # 각 스케일에 대한 비율로 anchor box 조정
             check_anchor_order(m)
-            self.stride = m.stride
+            self.stride = m.stride   # 8, 16, 32
             self._initialize_biases()  # only run once
             # print('Strides: %s' % m.stride.tolist())
 
@@ -120,10 +122,11 @@ class Model(nn.Module):
                 y.append(yi)
             return torch.cat(y, 1), None  # augmented inference, train
         else:
-            return self.forward_once(x, profile)  # single-scale inference, train
+            return self.forward_once(x, profile)  # single-scale inference, train  # return ([1, 3, 32, 32, 85])
 
-    def forward_once(self, x, profile=False):
+    def forward_once(self, x, profile=False): # x: (1, 3, 256, 256)
         y, dt = [], []  # outputs
+
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
